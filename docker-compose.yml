@@ -1,0 +1,22 @@
+version: '3'
+services:
+  mlflow:
+    image: mlflow/mlflow:1.30.0
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_HOME=/mlflow
+    volumes:
+      - mlflow-data:/mlflow
+    networks:
+      - mlflow-network
+    restart: always
+
+volumes:
+  mlflow-data:
+    driver: local
+
+networks:
+  mlflow-network:
+    driver: bridge
+
