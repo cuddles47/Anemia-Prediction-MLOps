@@ -39,3 +39,6 @@ logs/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# custom files
+run_notebook_instructions.md
