@@ -24,7 +24,7 @@ var/
 *.egg
 
 # MLflow
-mlruns/
+# mlruns/
 
 # Logs
 *.log

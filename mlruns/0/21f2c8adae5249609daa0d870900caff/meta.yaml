@@ -1,0 +1,15 @@
+artifact_uri: file:///home/kewwi/script/mlruns/0/21f2c8adae5249609daa0d870900caff/artifacts
+end_time: 1744571859177
+entry_point_name: ''
+experiment_id: '0'
+lifecycle_stage: active
+run_id: 21f2c8adae5249609daa0d870900caff
+run_name: nimble-trout-402
+run_uuid: 21f2c8adae5249609daa0d870900caff
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1744571854885
+status: 3
+tags: []
+user_id: kewwi
