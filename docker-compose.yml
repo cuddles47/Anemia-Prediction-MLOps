@@ -59,6 +59,26 @@ services:
             - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
             - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
         command: mlflow server --backend-store-uri mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE} --default-artifact-root s3://mlflow/ --host 0.0.0.0
+    
+    # Model Serving API
+    api:
+        restart: always
+        build: 
+            context: .
+            dockerfile: api/Dockerfile
+        image: anemia_model_api
+        container_name: anemia_model_api
+        depends_on:
+            - web
+        ports:
+            - "5001:5001"
+        environment:
+            - MLFLOW_TRACKING_URI=http://web:5000
+            - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+            - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+            - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+        volumes:
+            - ./mlruns:/app/mlruns
 
 volumes:
     dbdata:
