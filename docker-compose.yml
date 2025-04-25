@@ -2,7 +2,7 @@ version: '3.7'
 
 services:
     minio:
-        restart: always
+        restart: unless-stopped
         image: minio/minio@sha256:85f3e4cd1ca92a2711553ab79f222bcd8b75aa2c77a1a0b0ccf80d38e8ab2fe5
         container_name: mlflow_s3
         ports:
@@ -33,7 +33,7 @@ services:
             - ./wait-for-it.sh:/tmp/wait-for-it.sh
 
     db:
-        restart: always
+        restart: unless-stopped
         image: mysql/mysql-server@sha256:5b40d96b11333570143d98d3a74100fefadb9abb17b27a95dbc9ad33544ec142
         container_name: mlflow_db
         ports:
@@ -47,7 +47,7 @@ services:
             - dbdata:/var/lib/mysql
 
     web:
-        restart: always
+        restart: unless-stopped
         build: ./mlflow
         image: mlflow_server
         container_name: mlflow_server
