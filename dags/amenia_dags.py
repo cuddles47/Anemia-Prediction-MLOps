@@ -19,6 +19,10 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
 
 import mlflow
 from mlflow.models import infer_signature
@@ -438,45 +442,507 @@ def Quan_children_anemia():
                 logger.error(f"Failed to upload data to PostgreSQL: {e}")
                 raise
         
+        # Common preprocessing function to prepare data for model training
         @task
-        def training_model():
-            mlflow.sklearn.autolog()
-            
-            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
-            mlflow.set_experiment("MLflow Quickstart")
-            
+        def preprocess_data():
+            # Retrieve clean data
             response = get_minio_object(BUCKET_NAME, FINAL_OBJECT_PATH + "/children_anemia_clean.csv")
             dot = minio_object_to_dataframe(response)
+            
+            # Prepare features (X) and target variable (y)
             X = dot.drop(columns=['anemia_level_target'], axis=1)  # Features
-            y = dot['anemia_level_target']  # Target variable            
+            y = dot['anemia_level_target']  # Target variable
+            
+            # Handle categorical features with LabelEncoder
             obj = [col for col in X.columns if dot[col].dtype == 'object']
             for i in obj:
                 lr = LabelEncoder()  # Initialize a LabelEncoder for the current column
                 X[i] = lr.fit_transform(X[i])  # Transform the categorical values to numerical labels
+            
+            # Map target variable to numeric values
             y = y.map({'Dont know': 0, 'Moderate': 1, 'Mild': 2, 'Not anemic': 3, 'Severe': 4})
+            
+            # Split data into training and testing sets
             X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=42, test_size=0.2)
             
+            # Standardize features using StandardScaler
             std = StandardScaler()
-            X_train = std.fit_transform(X_train)
-            y_train = std.fit_transform(y_train)
+            X_train_scaled = std.fit_transform(X_train)
+            X_test_scaled = std.transform(X_test)
             
-            lrg = LogisticRegression()
+            # Return preprocessed data
+            return {
+                'X_train': X_train,
+                'X_test': X_test,
+                'y_train': y_train,
+                'y_test': y_test,
+                'X_train_scaled': X_train_scaled,
+                'X_test_scaled': X_test_scaled
+            }
+
+        @task
+        def train_logistic_regression(preprocessed_data):
+            # Enable MLflow autologging
+            mlflow.sklearn.autolog()
             
-            lrg.fit(X_train, y_train)
-            y_pred = lrg.predict(X_test)
-            def fetch_logged_data(run_id):
-                client = MlflowClient()
-                data = client.get_run(run_id).data
-                tags = {k: v for k, v in data.tags.items() if not k.startswith("mlflow.")}
-                artifacts = [f.path for f in client.list_artifacts(run_id, "model")]
-                return data.params, data.metrics, tags, artifacts
+            # Set up MLflow tracking - Connect to your MLflow server
+            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
+            mlflow.set_experiment("Anemia Classification Models")
             
+            # End any existing MLflow run before starting a new one
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
+                
+            # Unpack preprocessed data
+            X_train = preprocessed_data['X_train']
+            X_test = preprocessed_data['X_test']
+            y_train = preprocessed_data['y_train']
+            y_test = preprocessed_data['y_test']
+            X_train_scaled = preprocessed_data['X_train_scaled']
+            X_test_scaled = preprocessed_data['X_test_scaled']
             
+            # Start MLflow run for Logistic Regression
+            with mlflow.start_run(run_name="Logistic Regression"):
+                # Define model parameters
+                max_iter = 100
+                solver = 'lbfgs'
+                random_state = 42
+                
+                # Create and train the model
+                lrg = LogisticRegression(max_iter=max_iter, solver=solver, random_state=random_state)
+                lrg.fit(X_train_scaled, y_train)
+                y_pred = lrg.predict(X_test_scaled)
+                
+                # Calculate evaluation metrics
+                accuracy = accuracy_score(y_test, y_pred)
+                report = classification_report(y_test, y_pred, output_dict=True)
+                precision = report['weighted avg']['precision']
+                recall = report['weighted avg']['recall']
+                f1 = report['weighted avg']['f1-score']
+                
+                # Log parameters
+                mlflow.log_param("max_iter", max_iter)
+                mlflow.log_param("solver", solver)
+                mlflow.log_param("random_state", random_state)
+                
+                # Log metrics
+                mlflow.log_metric("accuracy", accuracy)
+                mlflow.log_metric("precision", precision)
+                mlflow.log_metric("recall", recall)
+                mlflow.log_metric("f1_score", f1)
+                
+                # Generate and save confusion matrix
+                cm = confusion_matrix(y_test, y_pred)
+                plt.figure(figsize=(10, 8))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+                plt.xlabel('Predicted')
+                plt.ylabel('True')
+                plt.title('Confusion Matrix')
+                cm_path = "/tmp/confusion_matrix_lr.png"
+                plt.savefig(cm_path)
+                mlflow.log_artifact(cm_path, "confusion_matrix")
+                
+                # Log model
+                mlflow.sklearn.log_model(lrg, "model")
+                
+                # Get the run ID for reference
+                run_id = mlflow.active_run().info.run_id
+                logger.info(f"Logistic Regression model trained and logged with MLflow run ID: {run_id}")
+                
+                return run_id
+                
+        @task
+        def train_decision_tree(preprocessed_data):
+            # Set up MLflow tracking
+            mlflow.sklearn.autolog()
+            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
+            mlflow.set_experiment("Anemia Classification Models")
             
-            return 0
+            # End any existing MLflow run
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
+                
+            # Unpack preprocessed data
+            X_train = preprocessed_data['X_train']
+            X_test = preprocessed_data['X_test']
+            y_train = preprocessed_data['y_train']
+            y_test = preprocessed_data['y_test']
+                
+            # Start MLflow run for Decision Tree
+            with mlflow.start_run(run_name="Decision Tree Classifier"):
+                # Define model parameters
+                random_state = 42
+                
+                # Create and train the model
+                dtc = DecisionTreeClassifier(random_state=random_state)
+                dtc.fit(X_train, y_train)
+                y_pred = dtc.predict(X_test)
+                
+                # Generate classification report
+                report = classification_report(y_test, y_pred, output_dict=True)
+                accuracy = report['accuracy']
+                precision = report['weighted avg']['precision']
+                recall = report['weighted avg']['recall']
+                f1 = report['weighted avg']['f1-score']
+                
+                # Log parameters
+                mlflow.log_param("random_state", random_state)
+                
+                # Log metrics
+                mlflow.log_metric("accuracy", accuracy)
+                mlflow.log_metric("precision", precision)
+                mlflow.log_metric("recall", recall)
+                mlflow.log_metric("f1_score", f1)
+                
+                # Log model
+                mlflow.sklearn.log_model(dtc, "model")
+                
+                # Get the run ID for reference
+                run_id = mlflow.active_run().info.run_id
+                logger.info(f"Decision Tree Classifier run logged with ID: {run_id}")
+                
+                return run_id
+
+        @task
+        def train_random_forest(preprocessed_data):
+            # Set up MLflow tracking
+            mlflow.sklearn.autolog()
+            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
+            mlflow.set_experiment("Anemia Classification Models")
+            
+            # End any existing MLflow run
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
+                
+            # Unpack preprocessed data
+            X_train = preprocessed_data['X_train']
+            X_test = preprocessed_data['X_test']
+            y_train = preprocessed_data['y_train']
+            y_test = preprocessed_data['y_test']
+                
+            # Start MLflow run for Random Forest
+            with mlflow.start_run(run_name="Random Forest Classifier"):
+                # Define model parameters
+                random_state = 42
+                n_estimators = 100
+                
+                # Create and train the model
+                rf = RandomForestClassifier(random_state=random_state, n_estimators=n_estimators)
+                rf.fit(X_train, y_train)
+                y_pred = rf.predict(X_test)
+                
+                # Generate classification report
+                report = classification_report(y_test, y_pred, output_dict=True)
+                accuracy = report['accuracy']
+                precision = report['weighted avg']['precision']
+                recall = report['weighted avg']['recall']
+                f1 = report['weighted avg']['f1-score']
+                
+                # Log parameters
+                mlflow.log_param("random_state", random_state)
+                mlflow.log_param("n_estimators", n_estimators)
+                
+                # Log metrics
+                mlflow.log_metric("accuracy", accuracy)
+                mlflow.log_metric("precision", precision)
+                mlflow.log_metric("recall", recall)
+                mlflow.log_metric("f1_score", f1)
+                
+                # Log model
+                mlflow.sklearn.log_model(rf, "model")
+                
+                # Get the run ID for reference
+                run_id = mlflow.active_run().info.run_id
+                logger.info(f"Random Forest Classifier run logged with ID: {run_id}")
+                
+                return run_id
+                
+        @task
+        def train_extra_trees(preprocessed_data):
+            # Set up MLflow tracking
+            mlflow.sklearn.autolog()
+            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
+            mlflow.set_experiment("Anemia Classification Models")
+            
+            # End any existing MLflow run
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
+                
+            # Unpack preprocessed data
+            X_train = preprocessed_data['X_train']
+            X_test = preprocessed_data['X_test']
+            y_train = preprocessed_data['y_train']
+            y_test = preprocessed_data['y_test']
+                
+            # Start MLflow run for Extra Trees
+            with mlflow.start_run(run_name="Extra Trees Classifier"):
+                # Define model parameters
+                random_state = 42
+                n_estimators = 100
+                
+                # Create and train the model
+                et = ExtraTreesClassifier(random_state=random_state, n_estimators=n_estimators)
+                et.fit(X_train, y_train)
+                y_pred = et.predict(X_test)
+                
+                # Generate classification report
+                report = classification_report(y_test, y_pred, output_dict=True)
+                accuracy = report['accuracy']
+                precision = report['weighted avg']['precision']
+                recall = report['weighted avg']['recall']
+                f1 = report['weighted avg']['f1-score']
+                
+                # Log parameters
+                mlflow.log_param("random_state", random_state)
+                mlflow.log_param("n_estimators", n_estimators)
+                
+                # Log metrics
+                mlflow.log_metric("accuracy", accuracy)
+                mlflow.log_metric("precision", precision)
+                mlflow.log_metric("recall", recall)
+                mlflow.log_metric("f1_score", f1)
+                
+                # Log model
+                mlflow.sklearn.log_model(et, "model")
+                
+                # Get the run ID for reference
+                run_id = mlflow.active_run().info.run_id
+                logger.info(f"Extra Trees Classifier run logged with ID: {run_id}")
+                
+                return run_id
+                
+        @task
+        def train_gradient_boosting(preprocessed_data):
+            # Set up MLflow tracking
+            mlflow.sklearn.autolog()
+            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
+            mlflow.set_experiment("Anemia Classification Models")
+            
+            # End any existing MLflow run
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
+                
+            # Unpack preprocessed data
+            X_train = preprocessed_data['X_train']
+            X_test = preprocessed_data['X_test']
+            y_train = preprocessed_data['y_train']
+            y_test = preprocessed_data['y_test']
+                
+            # Start MLflow run for Gradient Boosting
+            with mlflow.start_run(run_name="Gradient Boosting Classifier"):
+                # Define model parameters
+                random_state = 42
+                n_estimators = 100
+                learning_rate = 0.1
+                
+                # Create and train the model
+                gb = GradientBoostingClassifier(
+                    random_state=random_state, 
+                    n_estimators=n_estimators, 
+                    learning_rate=learning_rate
+                )
+                gb.fit(X_train, y_train)
+                y_pred = gb.predict(X_test)
+                
+                # Generate classification report
+                report = classification_report(y_test, y_pred, output_dict=True)
+                accuracy = report['accuracy']
+                precision = report['weighted avg']['precision']
+                recall = report['weighted avg']['recall']
+                f1 = report['weighted avg']['f1-score']
+                
+                # Log parameters
+                mlflow.log_param("random_state", random_state)
+                mlflow.log_param("n_estimators", n_estimators)
+                mlflow.log_param("learning_rate", learning_rate)
+                
+                # Log metrics
+                mlflow.log_metric("accuracy", accuracy)
+                mlflow.log_metric("precision", precision)
+                mlflow.log_metric("recall", recall)
+                mlflow.log_metric("f1_score", f1)
+                
+                # Log model
+                mlflow.sklearn.log_model(gb, "model")
+                
+                # Get the run ID for reference
+                run_id = mlflow.active_run().info.run_id
+                logger.info(f"Gradient Boosting Classifier run logged with ID: {run_id}")
+                
+                return run_id
+                
+        @task
+        def train_xgboost(preprocessed_data):
+            # Import XGBoost Classifier
+            try:
+                from xgboost import XGBClassifier
+            except ImportError:
+                logger.error("XGBoost not installed. Installing now...")
+                import subprocess
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "xgboost"])
+                from xgboost import XGBClassifier
+                
+            # Set up MLflow tracking
+            mlflow.xgboost.autolog()
+            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
+            mlflow.set_experiment("Anemia Classification Models")
+            
+            # End any existing MLflow run
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
+                
+            # Unpack preprocessed data
+            X_train = preprocessed_data['X_train']
+            X_test = preprocessed_data['X_test']
+            y_train = preprocessed_data['y_train']
+            y_test = preprocessed_data['y_test']
+            
+            # Start MLflow run for XGBoost
+            with mlflow.start_run(run_name="XGBoost Classifier"):
+                # Define model parameters
+                n_estimators = 100
+                max_depth = 4
+                learning_rate = 0.1
+                random_state = 42
+                
+                # Create and train the model
+                xgb_model = XGBClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth,
+                    learning_rate=learning_rate,
+                    random_state=random_state,
+                    eval_metric='mlogloss'
+                )
+                xgb_model.fit(X_train, y_train)
+                y_pred = xgb_model.predict(X_test)
+                
+                # Generate classification report
+                report = classification_report(y_test, y_pred, output_dict=True)
+                accuracy = report['accuracy']
+                precision = report['weighted avg']['precision']
+                recall = report['weighted avg']['recall']
+                f1 = report['weighted avg']['f1-score']
+                
+                # Log parameters
+                mlflow.log_param("n_estimators", n_estimators)
+                mlflow.log_param("max_depth", max_depth)
+                mlflow.log_param("learning_rate", learning_rate)
+                mlflow.log_param("random_state", random_state)
+                
+                # Log metrics
+                mlflow.log_metric("accuracy", accuracy)
+                mlflow.log_metric("precision", precision)
+                mlflow.log_metric("recall", recall)
+                mlflow.log_metric("f1_score", f1)
+                
+                # Log model
+                mlflow.xgboost.log_model(xgb_model, "model")
+                
+                # Get the run ID for reference
+                run_id = mlflow.active_run().info.run_id
+                logger.info(f"XGBoost Classifier run logged with ID: {run_id}")
+                
+                return run_id
         
-        
-        
+        @task
+        def create_roc_curve_visualization(preprocessed_data, model_run_ids):
+            """Create a visualization of ROC curves for all trained models"""
+            # Import ROC curve related functions
+            from sklearn.metrics import roc_curve, auc
+            
+            # Set up MLflow tracking
+            mlflow.set_tracking_uri(uri="http://192.168.88.216:5000")
+            
+            # End any existing MLflow run
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
+                
+            # Unpack preprocessed data
+            X_test = preprocessed_data['X_test']
+            y_test = preprocessed_data['y_test']
+            
+            # Load models from MLflow
+            client = MlflowClient(tracking_uri="http://192.168.88.216:5000")
+            models = []
+            
+            try:
+                # Create figure for ROC curves
+                plt.figure(figsize=(12, 8))
+                
+                # Get unique classes
+                classes = np.unique(y_test)
+                n_classes = len(classes)
+                colors = plt.cm.tab10(np.linspace(0, 1, len(model_run_ids)))
+                
+                # For each model run, load the model and calculate ROC curve
+                for i, run_id in enumerate(model_run_ids):
+                    if run_id:
+                        run = client.get_run(run_id)
+                        model_path = f"runs:/{run_id}/model"
+                        model_name = run.data.tags.get("mlflow.runName", f"Model {i+1}")
+                        
+                        try:
+                            # Load the model
+                            model = mlflow.pyfunc.load_model(model_path)
+                            
+                            # Get model predictions
+                            try:
+                                y_proba = model.predict(X_test)
+                                
+                                # For models that return probability arrays
+                                if isinstance(y_proba, np.ndarray) and len(y_proba.shape) > 1 and y_proba.shape[1] > 1:
+                                    # Compute ROC curve for each class
+                                    for c in range(n_classes):
+                                        y_true_bin = np.zeros_like(y_test, dtype=int)
+                                        y_true_bin[y_test == c] = 1
+                                        
+                                        fpr, tpr, _ = roc_curve(y_true_bin, y_proba[:, c])
+                                        roc_auc = auc(fpr, tpr)
+                                        
+                                        # Map class index to class name
+                                        class_name = {0: 'Dont know', 1: 'Moderate', 2: 'Mild', 3: 'Not anemic', 4: 'Severe'}.get(c, f'Class {c}')
+                                        
+                                        # Plot ROC curve
+                                        plt.plot(fpr, tpr, color=colors[i], lw=2, alpha=0.7,
+                                                linestyle=['-', '--', ':', '-.', '-'][c % 5],
+                                                label=f'{model_name} - {class_name} (AUC = {roc_auc:.2f})')
+                            except Exception as e:
+                                logger.warning(f"Error generating predictions for model {model_name}: {e}")
+                                continue
+                        except Exception as e:
+                            logger.warning(f"Could not load model for run {run_id}: {e}")
+                            continue
+                
+                # Add diagonal line (random classifier)
+                plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random classifier')
+                
+                # Set plot properties
+                plt.xlim([0.0, 1.0])
+                plt.ylim([0.0, 1.05])
+                plt.xlabel('False Positive Rate', fontsize=12)
+                plt.ylabel('True Positive Rate', fontsize=12)
+                plt.title('ROC Curves for All Models', fontsize=14)
+                plt.legend(loc="lower right", fontsize=10)
+                plt.grid(True, alpha=0.3)
+                
+                # Save the plot
+                roc_path = "/tmp/roc_curve_comparison.png"
+                plt.savefig(roc_path, bbox_inches='tight')
+                
+                # Log the ROC curve to MLflow
+                with mlflow.start_run(run_name="Model Comparison"):
+                    mlflow.log_artifact(roc_path, "model_comparison")
+                    
+                    # Get the run ID for reference
+                    run_id = mlflow.active_run().info.run_id
+                    logger.info(f"ROC curve comparison logged with MLflow run ID: {run_id}")
+                    
+                return run_id
+                
+            except Exception as e:
+                logger.error(f"Error creating ROC curve visualization: {e}")
+                return None
+
         t1 = rename_columns()
         t2 = task_group_1()
         t3 = task_group_2()
@@ -489,8 +955,15 @@ def Quan_children_anemia():
         t10 = standard_text_value()
         t11 = drop_na()
         t12 = upload_to_postgres()
-        t13 = training_model()
+        t13 = preprocess_data()
+        t14 = train_logistic_regression(t13)
+        t15 = train_decision_tree(t13)
+        t16 = train_random_forest(t13)
+        t17 = train_extra_trees(t13)
+        t18 = train_gradient_boosting(t13)
+        t19 = train_xgboost(t13)
+        t20 = create_roc_curve_visualization(t13, [t14, t15, t16, t17, t18, t19])
         
-        t1 >> [t2, t3, t4, t5, t6, t7] >> t8  >> t9 >> t10 >> t11 >> t12 >> t13
+        t1 >> [t2, t3, t4, t5, t6, t7] >> t8  >> t9 >> t10 >> t11 >> t12 >> [t13, t14, t15, t16, t17, t18, t19] >> t20
         
 Quan_children_anemia()
